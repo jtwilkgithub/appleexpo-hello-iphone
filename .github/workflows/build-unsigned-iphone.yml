@@ -1,0 +1,49 @@
+name: Build unsigned iPhone test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: hello-iphone-device-build
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build native iPhone app without signing
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -project HelloIPhone.xcodeproj -scheme HelloIPhone -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' SYMROOT="$PWD/.build/products" OBJROOT="$PWD/.build/intermediates" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= COMPILER_INDEX_STORE_ENABLE=NO build > build.log 2>&1 || { tail -n 120 build.log; exit 1; }
+          tail -n 8 build.log
+      - name: Verify device binary and package IPA
+        run: |
+          set -euo pipefail
+          APP='.build/products/Release-iphoneos/HelloIPhone.app'
+          test -f "$APP/HelloIPhone"
+          xcrun lipo -archs "$APP/HelloIPhone" | grep -w arm64
+          /usr/libexec/PlistBuddy -c 'Print DTPlatformName' "$APP/Info.plist" | grep -x iphoneos
+          mkdir -p output/Payload
+          cp -R "$APP" output/Payload/
+          cd output
+          ditto -c -k --keepParent Payload HelloIPhone-unsigned.ipa
+          shasum -a 256 HelloIPhone-unsigned.ipa > SHA256SUMS.txt
+          python3 - <<'PY'
+          import hashlib, json, pathlib, plistlib
+          ipa = pathlib.Path('HelloIPhone-unsigned.ipa')
+          info = plistlib.loads(pathlib.Path('Payload/HelloIPhone.app/Info.plist').read_bytes())
+          manifest = {'name':'Hello iPhone','version':info['CFBundleShortVersionString'],'build':info['CFBundleVersion'],'bundleId':info['CFBundleIdentifier'],'minimumOS':info['MinimumOSVersion'],'platform':info['DTPlatformName'],'signing':'unsigned; requires personal signing on Windows','file':ipa.name,'bytes':ipa.stat().st_size,'sha256':hashlib.sha256(ipa.read_bytes()).hexdigest(),'commit':__import__('os').environ['GITHUB_SHA']}
+          pathlib.Path('build-metadata.json').write_text(json.dumps(manifest, indent=2))
+          print(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HelloIPhone-unsigned
+          path: |
+            output/HelloIPhone-unsigned.ipa
+            output/SHA256SUMS.txt
+            output/build-metadata.json
+          retention-days: 3
+          if-no-files-found: error
